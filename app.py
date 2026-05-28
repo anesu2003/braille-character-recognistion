@@ -1,6 +1,7 @@
 """
 BrailleAI - Braille Character Recognition System
 Hybrid Deep Learning Framework: CNN + BiLSTM-CTC
+With Text-to-Speech Audio Output
 """
 
 import streamlit as st
@@ -10,8 +11,10 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 from torchvision import transforms
+from gtts import gTTS
 import json
 import os
+import io
 
 # ============================================================================
 # MODEL DEFINITIONS (must match training code exactly)
@@ -137,7 +140,6 @@ def predict_character(model, image, metadata, device):
         confidence, predicted = probabilities.max(1)
 
     idx_to_class = metadata['idx_to_class']
-    # Keys might be strings from JSON
     predicted_class = idx_to_class[str(predicted.item())] if str(predicted.item()) in idx_to_class else idx_to_class.get(predicted.item(), '?')
 
     # Get top 5 predictions
@@ -175,10 +177,10 @@ def predict_sentence(model, image, metadata, device):
     img_tensor = transform(padded).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output = model(img_tensor)  # (T, 1, classes)
+        output = model(img_tensor)
 
     # Greedy CTC decode
-    _, max_indices = output.max(2)  # (T, 1)
+    _, max_indices = output.max(2)
     indices = max_indices.squeeze(1).cpu().numpy()
 
     chars = []
@@ -192,8 +194,8 @@ def predict_sentence(model, image, metadata, device):
 
     predicted_text = ''.join(chars)
 
-    # Get confidence (average max probability across non-blank positions)
-    probs = torch.exp(output).squeeze(1)  # (T, classes)
+    # Get confidence
+    probs = torch.exp(output).squeeze(1)
     max_probs, _ = probs.max(1)
     non_blank_mask = max_indices.squeeze(1).cpu() != 0
     if non_blank_mask.any():
@@ -202,6 +204,31 @@ def predict_sentence(model, image, metadata, device):
         avg_confidence = 0.0
 
     return predicted_text, avg_confidence
+
+
+# ============================================================================
+# TEXT-TO-SPEECH FUNCTION
+# ============================================================================
+
+def text_to_audio(text):
+    """Convert text to audio bytes using gTTS."""
+    if not text or text.strip() == "":
+        return None
+    try:
+        # For single characters, spell them out clearly
+        if len(text.strip()) == 1:
+            speak_text = f"The character is {text}"
+        else:
+            speak_text = text
+
+        tts = gTTS(text=speak_text, lang='en', slow=False)
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+        return audio_buffer
+    except Exception as e:
+        st.warning(f"Audio generation failed: {e}")
+        return None
 
 
 # ============================================================================
@@ -424,6 +451,24 @@ st.markdown("""
         text-align: right;
     }
 
+    /* Audio section */
+    .audio-section {
+        background: rgba(110, 231, 183, 0.05);
+        border: 1px solid rgba(110, 231, 183, 0.15);
+        border-radius: 12px;
+        padding: 1rem;
+        margin-top: 1rem;
+        text-align: center;
+    }
+    .audio-label {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.7rem;
+        color: #6ee7b7;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        margin-bottom: 0.5rem;
+    }
+
     /* Model info footer */
     .model-info {
         text-align: center;
@@ -486,7 +531,8 @@ st.markdown("""
     <h1>Braille Character<br>Recognition System</h1>
     <p class="description">
         Upload a Braille image to recognise individual characters or full sentences
-        using a two-phase hybrid machine learning pipeline.
+        using a two-phase hybrid machine learning pipeline. Results include text output
+        and audio playback for accessibility.
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -497,7 +543,7 @@ try:
     models_loaded = True
 except Exception as e:
     models_loaded = False
-    st.error(f"⚠️ Failed to load models. Make sure model files are in the `models/` folder.\n\nError: {e}")
+    st.error(f"Failed to load models. Make sure model files are in the `models/` folder.\n\nError: {e}")
 
 if models_loaded:
     # ── Mode Tabs ──
@@ -539,6 +585,12 @@ if models_loaded:
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
+
+                # Audio output
+                st.markdown('<div class="audio-section"><div class="audio-label">Audio Output</div></div>', unsafe_allow_html=True)
+                audio_data = text_to_audio(predicted_class)
+                if audio_data:
+                    st.audio(audio_data, format="audio/mp3")
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown("##### Top 5 Predictions")
@@ -598,11 +650,25 @@ if models_loaded:
                 </div>
                 """, unsafe_allow_html=True)
 
+                # Audio output
                 if predicted_text:
+                    st.markdown('<div class="audio-section"><div class="audio-label">Audio Output — Listen to Translation</div></div>', unsafe_allow_html=True)
+                    audio_data = text_to_audio(predicted_text)
+                    if audio_data:
+                        st.audio(audio_data, format="audio/mp3")
+
                     st.markdown("<br>", unsafe_allow_html=True)
                     st.markdown("##### Character Breakdown")
                     chars_display = '  →  '.join(list(predicted_text.replace(' ', '␣')))
                     st.code(chars_display, language=None)
+
+                    # Download option
+                    st.download_button(
+                        label="📥 Download as Text File",
+                        data=predicted_text,
+                        file_name="braille_translation.txt",
+                        mime="text/plain",
+                    )
             else:
                 st.markdown("""
                 <div class="result-card" style="opacity: 0.5;">
@@ -636,6 +702,10 @@ if models_loaded:
             <div class="model-info-item">
                 <div class="model-info-value">{sent_meta.get('test_word_accuracy', 0):.1f}%</div>
                 <div class="model-info-label">Sentence Accuracy</div>
+            </div>
+            <div class="model-info-item">
+                <div class="model-info-value">gTTS</div>
+                <div class="model-info-label">Audio Engine</div>
             </div>
         </div>
     </div>
